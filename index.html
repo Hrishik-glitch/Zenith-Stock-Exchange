@@ -1161,77 +1161,136 @@ Buy / Sell logic
 ------------------------- */
 
 async function buyShares(symbol, qty){
-if(!qty || qty<=0){ alert("Enter valid quantity"); return; }
-const company = systemState.companies.find(c=>c.symbol===symbol);
-if(!company) return;
-const cost = company.price * qty;
-if(cost > currentUser.data.cash){ alert("Not enough cash"); return; }
-currentUser.data.cash -= cost;
+  if(!qty || qty <= 0){ 
+    alert("Enter valid quantity"); 
+    return; 
+  }
 
-const existing = currentUser.data.investments.find(i=>i.symbol===symbol && i.buyPrice===company.price);
-if(existing){
-existing.qty += qty;
-} else {
-currentUser.data.investments.push({ symbol, qty, buyPrice: company.price, buyTime: Date.now() });
-}
+  const company = systemState.companies.find(c => c.symbol === symbol);
+  if(!company) return;
 
-await syncParticipantData();
-renderHeader();
-renderInvestments();
-alert(`Bought ${qty} ${symbol} @ ${formatINR(company.price)} — cost ${formatINR(cost)}`);
+  const cost = company.price * qty;
+  if(cost > currentUser.data.cash){ 
+    alert("Not enough cash"); 
+    return; 
+  }
+
+  currentUser.data.cash -= cost;
+
+  // Merge with existing investments
+  const existing = currentUser.data.investments.find(i => i.symbol === symbol && i.buyPrice === company.price);
+  if(existing){
+    existing.qty += qty;
+  } else {
+    currentUser.data.investments.push({ 
+      symbol, 
+      qty, 
+      buyPrice: company.price, 
+      buyTime: Date.now() 
+    });
+  }
+
+  const saved = await syncParticipantData();
+  if(!saved) return;
+
+  renderHeader();
+  renderInvestments();
+  alert(`Bought ${qty} ${symbol} @ ${formatINR(company.price)} — cost ${formatINR(cost)}`);
 }
 
 async function sellShares(symbol, qty){
-if(!qty || qty<=0){ alert("Enter valid quantity"); return; }
-let remaining = qty;
-let totalProceeds = 0;
+  if(!qty || qty <= 0){ 
+    alert("Enter valid quantity"); 
+    return; 
+  }
 
-for(let i = currentUser.data.investments.length-1; i>=0 && remaining>0; i--){
-const inv = currentUser.data.investments[i];
-if(inv.symbol !== symbol) continue;
-const sellQty = Math.min(inv.qty, remaining);
-const livePrice = (systemState.companies.find(c=>c.symbol===symbol)?.price) || inv.buyPrice;
-totalProceeds += sellQty * livePrice;
-inv.qty -= sellQty;
-remaining -= sellQty;
-if(inv.qty === 0) currentUser.data.investments.splice(i,1);
-}
+  let remaining = qty;
+  let totalProceeds = 0;
 
-if(remaining>0){
-alert("You don't hold that many shares to sell.");
-return;
-}
+  for(let i = currentUser.data.investments.length - 1; i >= 0 && remaining > 0; i--){
+    const inv = currentUser.data.investments[i];
+    if(inv.symbol !== symbol) continue;
 
-currentUser.data.cash += totalProceeds;
-await syncParticipantData();
-renderHeader();
-renderInvestments();
-alert(`Sold ${qty} ${symbol} for ${formatINR(totalProceeds)}.`);
+    const sellQty = Math.min(inv.qty, remaining);
+    const livePrice = systemState.companies.find(c => c.symbol === symbol)?.price || inv.buyPrice;
+    totalProceeds += sellQty * livePrice;
+
+    inv.qty -= sellQty;
+    remaining -= sellQty;
+
+    if(inv.qty === 0) currentUser.data.investments.splice(i, 1);
+  }
+
+  if(remaining > 0){
+    alert("You don't hold that many shares to sell.");
+    return;
+  }
+
+  currentUser.data.cash += totalProceeds;
+
+  const saved = await syncParticipantData();
+  if(!saved) return;
+
+  renderHeader();
+  renderInvestments();
+  alert(`Sold ${qty} ${symbol} for ${formatINR(totalProceeds)}.`);
 }
 
 async function sellInvestment(index){
-const inv = currentUser.data.investments[index];
-if(!inv) return;
-const company = systemState.companies.find(c=>c.symbol===inv.symbol);
-const live = company ? company.price : inv.buyPrice;
-const proceeds = live * inv.qty;
-const profitLoss = proceeds - (inv.buyPrice * inv.qty);
+  const inv = currentUser.data.investments[index];
+  if(!inv) return;
 
-currentUser.data.investments.splice(index,1);
-currentUser.data.cash += proceeds;
-await syncParticipantData();
-renderHeader();
-renderInvestments();
-alert(`${profitLoss>=0 ? 'Profit' : 'Loss'}: ${formatINR(profitLoss)} on ${inv.symbol}`);
+  const company = systemState.companies.find(c => c.symbol === inv.symbol);
+  const livePrice = company ? company.price : inv.buyPrice;
+  const proceeds = livePrice * inv.qty;
+  const profitLoss = proceeds - (inv.buyPrice * inv.qty);
+
+  currentUser.data.investments.splice(index, 1);
+  currentUser.data.cash += proceeds;
+
+  const saved = await syncParticipantData();
+  if(!saved) return;
+
+  renderHeader();
+  renderInvestments();
+  alert(`${profitLoss >= 0 ? 'Profit' : 'Loss'}: ${formatINR(profitLoss)} on ${inv.symbol}`);
 }
 
+/* -------------------------
+Sync data with Supabase
+------------------------- */
 async function syncParticipantData(){
-const pIndex = systemState.participants.findIndex(p => p.username === currentUser.username);
-if(pIndex !== -1){
-systemState.participants[pIndex] = currentUser.data;
-await saveParticipant(currentUser.data);
+  try {
+    // Update local systemState
+    const pIndex = systemState.participants.findIndex(p => p.username === currentUser.username);
+    if(pIndex !== -1){
+      systemState.participants[pIndex] = currentUser.data;
+    }
+
+    // Save to Supabase
+    const { error } = await supabase
+      .from('participants')        // Your table name
+      .update({
+        cash: currentUser.data.cash,
+        investments: JSON.stringify(currentUser.data.investments) // Make sure column is JSON/Text
+      })
+      .eq('id', currentUser.data.id); // Use correct user ID
+
+    if(error){
+      console.error("Failed to save participant:", error.message);
+      alert("Error saving data. Check console.");
+      return false;
+    }
+
+    return true;
+
+  } catch(err){
+    console.error("Unexpected error saving participant:", err);
+    alert("Unexpected error. Check console.");
+    return false;
+  }
 }
-}
+
 
 /* -------------------------
 Controls
