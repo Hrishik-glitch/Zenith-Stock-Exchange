@@ -827,38 +827,39 @@ function calcMarketCap(){
 return systemState.companies.reduce((acc,c)=> acc + c.price * (1000000 + (c.symbol.charCodeAt(0)%5)*100000), 0);
 }
 
+// Buy confirmation
 buyBtn.addEventListener("click", async () => {
   const symbol = expandedSymbolSelected;
   const company = systemState.companies.find(c => c.symbol === symbol);
   const qty = Number(buyQtyInput.value);
   const totalCost = company.price * qty;
 
+  // Confirm dialog — user can click Cancel
   const confirmBuy = confirm(
     `Buy ${qty} shares of ${symbol} at ${formatINR(company.price)} each?\n\n` +
     `Total amount to be withdrawn: ${formatINR(totalCost)}`
   );
-
-  if (!confirmBuy) return;
+  if (!confirmBuy) return; // ⬅️ Cancel stops execution
 
   await handleBuy(symbol, qty);
 });
 
+// Sell confirmation
 sellBtn.addEventListener("click", async () => {
   const symbol = expandedSymbolSelected;
   const company = systemState.companies.find(c => c.symbol === symbol);
   const qty = Number(sellQtyInput.value);
   const totalGain = company.price * qty;
 
+  // Confirm dialog — user can click Cancel
   const confirmSell = confirm(
     `Sell ${qty} shares of ${symbol} at ${formatINR(company.price)} each?\n\n` +
     `Total amount to be deposited: ${formatINR(totalGain)}`
   );
-
-  if (!confirmSell) return;
+  if (!confirmSell) return; // ⬅️ Cancel stops execution
 
   await handleSell(symbol, qty);
 });
-
 
 function renderHeader(){
 marketCapEl.textContent = formatINR(calcMarketCap()/1e6) + "M";
