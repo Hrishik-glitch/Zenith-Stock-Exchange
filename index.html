@@ -856,7 +856,7 @@ buyBtn.addEventListener("click", async () => {
   if (!confirmBuy) return;
 
   console.log("Buying:", symbol, qty); // ✅ Debug log
-  await handleBuy(symbol, qty);
+  await buyShares(symbol, qty);
 });
 
 sellBtn.addEventListener("click", async () => {
@@ -888,7 +888,7 @@ sellBtn.addEventListener("click", async () => {
   if (!confirmSell) return;
 
   console.log("Selling:", symbol, qty); // ✅ Debug log
-  await handleSell(symbol, qty);
+  await sellShares(symbol, qty);
 });
 
 function renderHeader(){
