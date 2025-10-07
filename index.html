@@ -826,36 +826,68 @@ let expandedChart = null;
 function calcMarketCap(){
 return systemState.companies.reduce((acc,c)=> acc + c.price * (1000000 + (c.symbol.charCodeAt(0)%5)*100000), 0);
 }
-
+// ✅ Confirmed working buy/sell logic with safety checks
 buyBtn.addEventListener("click", async () => {
+  if (!expandedSymbolSelected) {
+    alert("No stock selected!");
+    return;
+  }
+
   const symbol = expandedSymbolSelected;
   const company = systemState.companies.find(c => c.symbol === symbol);
+  if (!company) {
+    alert("Invalid company!");
+    return;
+  }
+
   const qty = Number(buyQtyInput.value);
+  if (isNaN(qty) || qty <= 0) {
+    alert("Enter a valid quantity!");
+    return;
+  }
+
   const totalCost = company.price * qty;
 
+  // Confirm dialog
   const confirmBuy = confirm(
     `Buy ${qty} shares of ${symbol} at ${formatINR(company.price)} each?\n\n` +
     `Total amount to be withdrawn: ${formatINR(totalCost)}`
   );
-
   if (!confirmBuy) return;
 
+  console.log("Buying:", symbol, qty); // ✅ Debug log
   await handleBuy(symbol, qty);
 });
 
 sellBtn.addEventListener("click", async () => {
+  if (!expandedSymbolSelected) {
+    alert("No stock selected!");
+    return;
+  }
+
   const symbol = expandedSymbolSelected;
   const company = systemState.companies.find(c => c.symbol === symbol);
+  if (!company) {
+    alert("Invalid company!");
+    return;
+  }
+
   const qty = Number(sellQtyInput.value);
+  if (isNaN(qty) || qty <= 0) {
+    alert("Enter a valid quantity!");
+    return;
+  }
+
   const totalGain = company.price * qty;
 
+  // Confirm dialog
   const confirmSell = confirm(
     `Sell ${qty} shares of ${symbol} at ${formatINR(company.price)} each?\n\n` +
     `Total amount to be deposited: ${formatINR(totalGain)}`
   );
-
   if (!confirmSell) return;
 
+  console.log("Selling:", symbol, qty); // ✅ Debug log
   await handleSell(symbol, qty);
 });
 
