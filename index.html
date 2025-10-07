@@ -360,27 +360,27 @@ Built for demo — not financial advice.
 
 <script>
 /* -------------------------
+Supabase Configuration
+------------------------- */
+
+// REPLACE THESE WITH YOUR SUPABASE CREDENTIALS
+const SUPABASE_URL = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+/* -------------------------
 System Configuration & Auth
 ------------------------- */
 
-const STORAGE_KEY = "zenith_multi_v1";
 const ADMIN_DEFAULT = {username: "admin", password: "admin123", role: "admin"};
 
 let systemState = {
 marketRunning: true,
 admin: ADMIN_DEFAULT,
 participants: [],
-stocks: [
-{ symbol: "ZFN", name: "Zenith Foods", price: 120.0 },
-{ symbol: "AER", name: "AeroNova", price: 430.5 },
-{ symbol: "BIQ", name: "BioQuanta", price: 85.25 },
-{ symbol: "CYR", name: "CyberYarn", price: 26.75 },
-{ symbol: "SOL", name: "Solara Energies", price: 210.0 },
-{ symbol: "NEX", name: "NexRetail", price: 58.4 },
-{ symbol: "MTR", name: "MetroDrive", price: 340.0 },
-{ symbol: "PIX", name: "PixelWorks", price: 14.6 },
-],
-companies: [], // runtime state
+stocks: [],
+companies: [],
 intervalMs: 5000,
 running: true,
 };
@@ -393,29 +393,120 @@ function randBetween(min,max){ return Math.random()*(max-min)+min }
 function formatINR(n){ return "₹" + Number(n).toLocaleString('en-IN', {maximumFractionDigits:2, minimumFractionDigits:2}) }
 
 /* -------------------------
-Persistence
+Supabase Functions
 ------------------------- */
 
-function loadSystemState(){
+async function loadSystemState(){
 try{
-const raw = localStorage.getItem(STORAGE_KEY);
-if(raw){
-const parsed = JSON.parse(raw);
-systemState = {...systemState, ...parsed};
-}
-}catch(e){ console.warn("load failed",e) }
-initializeCompanies();
+// Load system config
+const { data: config, error: configError } = await supabase
+.from('system_config')
+.select('*')
+.eq('id', 1)
+.single();
+
+if (!configError && config) {
+systemState.marketRunning = config.market_running;
+systemState.intervalMs = config.interval_ms;
 }
 
-function saveSystemState(){
-const toSave = {
-marketRunning: systemState.marketRunning,
-admin: systemState.admin,
-participants: systemState.participants,
-stocks: systemState.stocks,
-intervalMs: systemState.intervalMs,
+// Load participants
+const { data: participants, error: participantsError } = await supabase
+.from('participants')
+.select('*');
+
+if (!participantsError && participants) {
+systemState.participants = participants.map(p => ({
+username: p.username,
+password: p.password,
+cash: Number(p.cash),
+investments: p.investments || []
+}));
+}
+
+// Load stocks
+const { data: stocks, error: stocksError } = await supabase
+.from('stocks')
+.select('*');
+
+if (!stocksError && stocks) {
+systemState.stocks = stocks.map(s => ({
+symbol: s.symbol,
+name: s.name,
+price: Number(s.price)
+}));
+}
+
+// Load admin
+const { data: admin, error: adminError } = await supabase
+.from('admin_users')
+.select('*')
+.eq('username', 'admin')
+.single();
+
+if (!adminError && admin) {
+systemState.admin = {
+username: admin.username,
+password: admin.password,
+role: 'admin'
 };
-localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+}
+
+initializeCompanies();
+}catch(e){ 
+console.warn("load failed", e);
+}
+}
+
+async function saveSystemConfig(){
+await supabase
+.from('system_config')
+.update({ 
+market_running: systemState.marketRunning,
+interval_ms: systemState.intervalMs 
+})
+.eq('id', 1);
+}
+
+async function saveParticipant(participant){
+const { data, error } = await supabase
+.from('participants')
+.upsert({
+username: participant.username,
+password: participant.password,
+cash: participant.cash,
+investments: participant.investments
+}, { onConflict: 'username' })
+.select();
+
+return !error;
+}
+
+async function deleteParticipantFromDB(username){
+await supabase
+.from('participants')
+.delete()
+.eq('username', username);
+}
+
+async function saveStockToDB(stock){
+const { data, error } = await supabase
+.from('stocks')
+.upsert({
+symbol: stock.symbol,
+name: stock.name,
+price: stock.price
+}, { onConflict: 'symbol' })
+.select();
+
+return !error;
+}
+
+async function deleteStockFromDB(symbol){
+await supabase
+.from('stocks')
+.delete()
+.eq('symbol', symbol);
 }
 
 function initializeCompanies(){
@@ -431,7 +522,7 @@ volume: Math.floor(randBetween(1000,50000))
 Authentication
 ------------------------- */
 
-function login(username, password){
+async function login(username, password){
 // Check admin
 if(username === systemState.admin.username && password === systemState.admin.password){
 currentUser = {username, role: "admin"};
@@ -549,16 +640,16 @@ stockList.appendChild(div);
 });
 }
 
-function startMarket(){
+async function startMarket(){
 systemState.marketRunning = true;
-saveSystemState();
+await saveSystemConfig();
 renderAdminDashboard();
 alert('Market started! Participants can now login and trade.');
 }
 
-function stopMarket(){
+async function stopMarket(){
 systemState.marketRunning = false;
-saveSystemState();
+await saveSystemConfig();
 renderAdminDashboard();
 alert('Market stopped! Participants cannot login or trade.');
 }
@@ -586,7 +677,7 @@ document.getElementById('modalParticipantBalance').value = p.cash;
 document.getElementById('participantModal').classList.add('active');
 }
 
-function saveParticipant(){
+async function saveParticipantHandler(){
 const username = document.getElementById('modalParticipantId').value.trim();
 const password = document.getElementById('modalParticipantPassword').value;
 const cash = Number(document.getElementById('modalParticipantBalance').value);
@@ -610,30 +701,32 @@ alert('Username already exists');
 return;
 }
 
-if(editingParticipantIndex !== null){
-// Edit existing
-systemState.participants[editingParticipantIndex].username = username;
-systemState.participants[editingParticipantIndex].password = password;
-systemState.participants[editingParticipantIndex].cash = cash;
-} else {
-// Add new
-systemState.participants.push({
+const participant = {
 username,
 password,
 cash,
-investments: []
-});
-}
+investments: editingParticipantIndex !== null ? systemState.participants[editingParticipantIndex].investments : []
+};
 
-saveSystemState();
+const success = await saveParticipant(participant);
+if(success){
+if(editingParticipantIndex !== null){
+systemState.participants[editingParticipantIndex] = participant;
+} else {
+systemState.participants.push(participant);
+}
 document.getElementById('participantModal').classList.remove('active');
 renderAdminDashboard();
+} else {
+alert('Failed to save participant');
+}
 }
 
-function deleteParticipant(index){
-if(!confirm(Delete participant ${systemState.participants[index].username}?)) return;
+async function deleteParticipant(index){
+if(!confirm(`Delete participant ${systemState.participants[index].username}?`)) return;
+const username = systemState.participants[index].username;
+await deleteParticipantFromDB(username);
 systemState.participants.splice(index, 1);
-saveSystemState();
 renderAdminDashboard();
 }
 
@@ -660,7 +753,7 @@ document.getElementById('modalStockPrice').value = s.price;
 document.getElementById('stockModal').classList.add('active');
 }
 
-function saveStock(){
+async function saveStockHandler(){
 const symbol = document.getElementById('modalStockSymbol').value.trim().toUpperCase();
 const name = document.getElementById('modalStockName').value.trim();
 const price = Number(document.getElementById('modalStockPrice').value);
@@ -679,26 +772,28 @@ alert('Stock symbol already exists');
 return;
 }
 
-if(editingStockIndex !== null){
-// Edit existing
-systemState.stocks[editingStockIndex].symbol = symbol;
-systemState.stocks[editingStockIndex].name = name;
-systemState.stocks[editingStockIndex].price = price;
-} else {
-// Add new
-systemState.stocks.push({symbol, name, price});
-}
+const stock = {symbol, name, price};
+const success = await saveStockToDB(stock);
 
-saveSystemState();
+if(success){
+if(editingStockIndex !== null){
+systemState.stocks[editingStockIndex] = stock;
+} else {
+systemState.stocks.push(stock);
+}
 initializeCompanies();
 document.getElementById('stockModal').classList.remove('active');
 renderAdminDashboard();
+} else {
+alert('Failed to save stock');
+}
 }
 
-function deleteStock(index){
-if(!confirm(Delete stock ${systemState.stocks[index].symbol}?)) return;
+async function deleteStock(index){
+if(!confirm(`Delete stock ${systemState.stocks[index].symbol}?`)) return;
+const symbol = systemState.stocks[index].symbol;
+await deleteStockFromDB(symbol);
 systemState.stocks.splice(index, 1);
-saveSystemState();
 initializeCompanies();
 renderAdminDashboard();
 }
@@ -786,7 +881,7 @@ drawSpark(canvas, c.history);
 function renderInvestments(){
 investListEl.innerHTML = "";
 if(currentUser.data.investments.length === 0){
-investListEl.innerHTML = <div class="muted small" style="margin-top:8px">No holdings yet.</div>;
+investListEl.innerHTML = `<div class="muted small" style="margin-top:8px">No holdings yet.</div>`;
 portfolioEl.textContent = formatINR(currentUser.data.cash);
 return;
 }
@@ -866,8 +961,8 @@ const c = systemState.companies.find(x=>x.symbol===symbol);
 expandedSymbol.textContent = c.symbol;
 expandedName.textContent = c.name;
 expandedPrice.textContent = formatINR(c.price);
-expandedChange.textContent = ${c.change>=0?'+':''}${c.change.toFixed(2)} (${(((c.change)/(c.price - c.change))*100)||0 .toFixed(2)}%);
-expandedVol.textContent = Vol ${c.volume.toLocaleString()};
+expandedChange.textContent = `${c.change>=0?'+':''}${c.change.toFixed(2)} (${(((c.change)/(c.price - c.change))*100)||0 .toFixed(2)}%)`;
+expandedVol.textContent = `Vol ${c.volume.toLocaleString()}`;
 expandedArea.style.display = "block";
 
 buyQtyInput.value = 10;
@@ -938,7 +1033,7 @@ if(expandedSymbolSelected){
 const c = systemState.companies.find(x=>x.symbol===expandedSymbolSelected);
 if(c){
 expandedPrice.textContent = formatINR(c.price);
-expandedVol.textContent = Vol ${c.volume.toLocaleString()};
+expandedVol.textContent = `Vol ${c.volume.toLocaleString()}`;
 drawExpandedChart(c.history, c.name);
 } else {
 collapseExpanded();
@@ -950,7 +1045,7 @@ collapseExpanded();
 Buy / Sell logic
 ------------------------- */
 
-function buyShares(symbol, qty){
+async function buyShares(symbol, qty){
 if(!qty || qty<=0){ alert("Enter valid quantity"); return; }
 const company = systemState.companies.find(c=>c.symbol===symbol);
 if(!company) return;
@@ -965,13 +1060,13 @@ existing.qty += qty;
 currentUser.data.investments.push({ symbol, qty, buyPrice: company.price, buyTime: Date.now() });
 }
 
-syncParticipantData();
+await syncParticipantData();
 renderHeader();
 renderInvestments();
-alert(Bought ${qty} ${symbol} @ ${formatINR(company.price)} — cost ${formatINR(cost)});
+alert(`Bought ${qty} ${symbol} @ ${formatINR(company.price)} — cost ${formatINR(cost)}`);
 }
 
-function sellShares(symbol, qty){
+async function sellShares(symbol, qty){
 if(!qty || qty<=0){ alert("Enter valid quantity"); return; }
 let remaining = qty;
 let totalProceeds = 0;
@@ -993,13 +1088,13 @@ return;
 }
 
 currentUser.data.cash += totalProceeds;
-syncParticipantData();
+await syncParticipantData();
 renderHeader();
 renderInvestments();
-alert(Sold ${qty} ${symbol} for ${formatINR(totalProceeds)}.);
+alert(`Sold ${qty} ${symbol} for ${formatINR(totalProceeds)}.`);
 }
 
-function sellInvestment(index){
+async function sellInvestment(index){
 const inv = currentUser.data.investments[index];
 if(!inv) return;
 const company = systemState.companies.find(c=>c.symbol===inv.symbol);
@@ -1009,17 +1104,17 @@ const profitLoss = proceeds - (inv.buyPrice * inv.qty);
 
 currentUser.data.investments.splice(index,1);
 currentUser.data.cash += proceeds;
-syncParticipantData();
+await syncParticipantData();
 renderHeader();
 renderInvestments();
-alert(${profitLoss>=0 ? 'Profit' : 'Loss'}: ${formatINR(profitLoss)} on ${inv.symbol});
+alert(`${profitLoss>=0 ? 'Profit' : 'Loss'}: ${formatINR(profitLoss)} on ${inv.symbol}`);
 }
 
-function syncParticipantData(){
+async function syncParticipantData(){
 const pIndex = systemState.participants.findIndex(p => p.username === currentUser.username);
 if(pIndex !== -1){
 systemState.participants[pIndex] = currentUser.data;
-saveSystemState();
+await saveParticipant(currentUser.data);
 }
 }
 
@@ -1027,9 +1122,9 @@ saveSystemState();
 Controls
 ------------------------- */
 
-intervalSelect.addEventListener('change', (e)=>{
+intervalSelect.addEventListener('change', async (e)=>{
 systemState.intervalMs = Number(e.target.value);
-saveSystemState();
+await saveSystemConfig();
 restartTicker();
 });
 
@@ -1060,10 +1155,10 @@ function restartTicker(){ startTicker(); }
 Event Handlers
 ------------------------- */
 
-document.getElementById('loginBtn').addEventListener('click', ()=>{
+document.getElementById('loginBtn').addEventListener('click', async ()=>{
 const username = document.getElementById('loginUsername').value.trim();
 const password = document.getElementById('loginPassword').value;
-const result = login(username, password);
+const result = await login(username, password);
 const errorEl = document.getElementById('loginError');
 
 if(result === true){
@@ -1085,13 +1180,13 @@ document.getElementById('startMarketBtn').addEventListener('click', startMarket)
 document.getElementById('stopMarketBtn').addEventListener('click', stopMarket);
 
 document.getElementById('addParticipantBtn').addEventListener('click', addParticipant);
-document.getElementById('saveParticipantBtn').addEventListener('click', saveParticipant);
+document.getElementById('saveParticipantBtn').addEventListener('click', saveParticipantHandler);
 document.getElementById('cancelParticipantBtn').addEventListener('click', ()=>{
 document.getElementById('participantModal').classList.remove('active');
 });
 
 document.getElementById('addStockBtn').addEventListener('click', addStock);
-document.getElementById('saveStockBtn').addEventListener('click', saveStock);
+document.getElementById('saveStockBtn').addEventListener('click', saveStockHandler);
 document.getElementById('cancelStockBtn').addEventListener('click', ()=>{
 document.getElementById('stockModal').classList.remove('active');
 });
@@ -1106,13 +1201,12 @@ window.deleteStock = deleteStock;
 Initialize
 ------------------------- */
 
-function init(){
-loadSystemState();
+async function init(){
+await loadSystemState();
 showLoginScreen();
 }
 
 init();
-
 </script>
 </body>
 </html>
