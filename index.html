@@ -1259,37 +1259,47 @@ async function sellInvestment(index){
 /* -------------------------
 Sync data with Supabase
 ------------------------- */
-async function syncParticipantData(){
+async function syncParticipantData() {
   try {
+    // Ensure ID is valid
+    const userId = Number(currentUser.data.id);
+    if (!userId) throw new Error("Invalid user ID");
+
+    // Ensure cash is a number
+    const cash = Number(currentUser.data.cash);
+    if (isNaN(cash)) throw new Error("Invalid cash value");
+
     // Update local systemState
     const pIndex = systemState.participants.findIndex(p => p.username === currentUser.username);
-    if(pIndex !== -1){
+    if (pIndex !== -1) {
       systemState.participants[pIndex] = currentUser.data;
     }
 
     // Save to Supabase
     const { error } = await supabase
-      .from('participants')        // Your table name
+      .from('participants') // Your table name
       .update({
-        cash: currentUser.data.cash,
-        investments: JSON.stringify(currentUser.data.investments) // Make sure column is JSON/Text
+        cash: cash,
+        investments: JSON.stringify(currentUser.data.investments || []) // Ensure JSON format
       })
-      .eq('id', currentUser.data.id); // Use correct user ID
+      .eq('id', userId); // Use numeric ID
 
-    if(error){
+    if (error) {
       console.error("Failed to save participant:", error.message);
       alert("Error saving data. Check console.");
       return false;
     }
 
+    console.log("Participant data synced successfully.");
     return true;
 
-  } catch(err){
+  } catch (err) {
     console.error("Unexpected error saving participant:", err);
     alert("Unexpected error. Check console.");
     return false;
   }
 }
+
 
 
 /* -------------------------
