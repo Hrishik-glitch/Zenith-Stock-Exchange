@@ -827,6 +827,39 @@ function calcMarketCap(){
 return systemState.companies.reduce((acc,c)=> acc + c.price * (1000000 + (c.symbol.charCodeAt(0)%5)*100000), 0);
 }
 
+buyBtn.addEventListener("click", async () => {
+  const symbol = expandedSymbolSelected;
+  const company = systemState.companies.find(c => c.symbol === symbol);
+  const qty = Number(buyQtyInput.value);
+  const totalCost = company.price * qty;
+
+  const confirmBuy = confirm(
+    `Buy ${qty} shares of ${symbol} at ${formatINR(company.price)} each?\n\n` +
+    `Total amount to be withdrawn: ${formatINR(totalCost)}`
+  );
+
+  if (!confirmBuy) return;
+
+  await handleBuy(symbol, qty);
+});
+
+sellBtn.addEventListener("click", async () => {
+  const symbol = expandedSymbolSelected;
+  const company = systemState.companies.find(c => c.symbol === symbol);
+  const qty = Number(sellQtyInput.value);
+  const totalGain = company.price * qty;
+
+  const confirmSell = confirm(
+    `Sell ${qty} shares of ${symbol} at ${formatINR(company.price)} each?\n\n` +
+    `Total amount to be deposited: ${formatINR(totalGain)}`
+  );
+
+  if (!confirmSell) return;
+
+  await handleSell(symbol, qty);
+});
+
+
 function renderHeader(){
 marketCapEl.textContent = formatINR(calcMarketCap()/1e6) + "M";
 cashEl.textContent = formatINR(currentUser.data.cash);
@@ -970,9 +1003,60 @@ sellQtyInput.value = 10;
 
 drawExpandedChart(c.history, c.name);
 
-buyBtn.onclick = ()=> buyShares(symbol, Number(buyQtyInput.value||0));
-sellBtn.onclick = ()=> sellShares(symbol, Number(sellQtyInput.value||0));
+async function handleBuy(symbol, qty) {
+  const company = systemState.companies.find(c => c.symbol === symbol);
+  const totalCost = company.price * qty;
+
+  if (currentUser.data.cash < totalCost) {
+    alert("Insufficient funds!");
+    return;
+  }
+
+  currentUser.data.cash -= totalCost;
+
+  let inv = currentUser.data.investments.find(i => i.symbol === symbol);
+  if (inv) {
+    inv.buyPrice = (inv.buyPrice * inv.qty + company.price * qty) / (inv.qty + qty);
+    inv.qty += qty;
+  } else {
+    currentUser.data.investments.push({
+      symbol,
+      qty,
+      buyPrice: company.price
+    });
+  }
+
+  await saveParticipant(currentUser.data);
+  renderHeader();
+  renderInvestments();
+  alert(`Bought ${qty} shares of ${symbol} successfully.`);
 }
+
+async function handleSell(symbol, qty) {
+  let inv = currentUser.data.investments.find(i => i.symbol === symbol);
+  if (!inv || inv.qty < qty) {
+    alert("You don't have enough shares to sell!");
+    return;
+  }
+
+  const company = systemState.companies.find(c => c.symbol === symbol);
+  const totalGain = company.price * qty;
+
+  inv.qty -= qty;
+  if (inv.qty === 0) {
+    currentUser.data.investments = currentUser.data.investments.filter(i => i.symbol !== symbol);
+  }
+
+  currentUser.data.cash += totalGain;
+
+  await saveParticipant(currentUser.data);
+  renderHeader();
+  renderInvestments();
+  alert(`Sold ${qty} shares of ${symbol} successfully.`);
+}
+
+}
+
 
 function collapseExpanded(){
 expandedSymbolSelected = null;
