@@ -233,13 +233,9 @@ header{flex-direction:column;align-items:flex-start;gap:8px}
 
 <label class="small muted" style="margin-left:10px">Update</label>
 <select id="intervalSelect" title="Update interval">
-<option value="5000">5 seconds (demo)</option>
-<option value="60000">1 minute</option>
-<option value="300000">5 minutes</option>
-<option value="600000">10 minutes</option>
+<option value="30000">30 Seconds</option>
 </select>
 
-<button id="pauseBtn" class="ghost" style="margin-left:8px">Pause</button>
 <button class="ghost" id="logoutBtnParticipant" style="margin-left:6px">Logout</button>
 </div>
 </header>
@@ -390,7 +386,7 @@ let editingParticipantIndex = null;
 let editingStockIndex = null;
 
 function randBetween(min,max){ return Math.random()*(max-min)+min }
-function formatINR(n){ return "₹" + Number(n).toLocaleString('en-IN', {maximumFractionDigits:2, minimumFractionDigits:2}) }
+function formatINR(n){ return "Ƶ" + Number(n).toLocaleString('en-IN', {maximumFractionDigits:2, minimumFractionDigits:2}) }
 
 /* -------------------------
 Supabase Functions
@@ -452,7 +448,7 @@ role: 'admin'
 };
 }
 
-initializeCompanies();
+await initializeCompanies();
 }catch(e){ 
 console.warn("load failed", e);
 }
@@ -495,13 +491,14 @@ const { data, error } = await supabase
 .upsert({
 symbol: stock.symbol,
 name: stock.name,
-price: stock.price
+price: stock.price,
+current_price: stock.price  // ← Add this line
 }, { onConflict: 'symbol' })
 .select();
 
 return !error;
 }
-
+  
 async function deleteStockFromDB(symbol){
 await supabase
 .from('stocks')
@@ -509,13 +506,73 @@ await supabase
 .eq('symbol', symbol);
 }
 
-function initializeCompanies(){
+async function updateStockPrices() {
+// Update prices in systemState.companies (simulated market movement)
+systemState.companies = systemState.companies.map(c => {
+const volatility = 0.04;
+const pct = (Math.random() * 2 - 1) * volatility;
+const newPrice = Math.max(0.01, c.price * (1 + pct));
+const change = newPrice - c.price;
+const newHistory = [...c.history.slice(1), Number(newPrice.toFixed(2))];
+const newVolume = c.volume + Math.floor(randBetween(100, 20000));
+return {
+...c,
+price: Number(newPrice.toFixed(2)),
+change: Number(change.toFixed(2)),
+history: newHistory,
+volume: newVolume
+};
+});
+
+// Save ALL updated prices to Supabase
+const updates = systemState.companies.map(c => ({
+symbol: c.symbol,
+current_price: c.price
+}));
+
+// Batch update to Supabase
+for (const update of updates) {
+await supabase
+.from('stocks')
+.update({ current_price: update.current_price })
+.eq('symbol', update.symbol);
+}
+}
+
+async function fetchCurrentPrices() {
+// Fetch current prices from Supabase
+const { data: stocks, error } = await supabase
+.from('stocks')
+.select('symbol, current_price');
+
+if (!error && stocks) {
+// Update local companies with Supabase prices
+stocks.forEach(stock => {
+const company = systemState.companies.find(c => c.symbol === stock.symbol);
+if (company && stock.current_price) {
+const oldPrice = company.price;
+const newPrice = Number(stock.current_price);
+company.price = newPrice;
+company.change = newPrice - oldPrice;
+// Update history
+company.history = [...company.history.slice(1), newPrice];
+}
+});
+}
+}
+
+
+
+async function initializeCompanies(){
 systemState.companies = systemState.stocks.map(s => ({
 ...s,
 change: 0,
-history: Array.from({length:12}, () => s.price),
+history: Array.from({length:12}, () => s.current_price || s.price),
 volume: Math.floor(randBetween(1000,50000))
 }));
+
+// Fetch current prices from Supabase
+await fetchCurrentPrices();
 }
 
 /* -------------------------
@@ -542,6 +599,7 @@ return false;
 
 function logout(){
 currentUser = null;
+stopAdminRefresh();
 showLoginScreen();
 }
 
@@ -572,6 +630,7 @@ function showAdminView(){
 document.getElementById('adminPanel').style.display = 'block';
 document.getElementById('participantView').style.display = 'none';
 renderAdminDashboard();
+startAdminRefresh();
 }
 
 function showParticipantView(){
@@ -582,6 +641,46 @@ renderParticipantView();
 startTicker();
 }
 
+/* -------------------------
+Admin Auto-Refresh
+------------------------- */
+
+let adminRefreshHandle = null;
+
+async function refreshAdminData(){
+if(currentUser && currentUser.role === 'admin'){
+// Fetch latest data from Supabase
+const { data: participants, error: participantsError } = await supabase
+.from('participants')
+.select('*');
+
+if (!participantsError && participants) {
+systemState.participants = participants.map(p => ({
+username: p.username,
+password: p.password,
+cash: Number(p.cash),
+investments: p.investments || []
+}));
+}
+
+// Re-render with fresh data
+renderAdminDashboard();
+}
+}
+
+function startAdminRefresh(){
+stopAdminRefresh();
+adminRefreshHandle = setInterval(()=> {
+refreshAdminData();
+}, 3000); // Refresh every 3 seconds
+}
+
+function stopAdminRefresh(){
+if(adminRefreshHandle) { 
+clearInterval(adminRefreshHandle); 
+adminRefreshHandle = null; 
+}
+}
 /* -------------------------
 Admin Dashboard
 ------------------------- */
@@ -597,43 +696,162 @@ statusEl.textContent = 'Stopped';
 statusEl.className = 'market-status stopped';
 }
 
-// Participants
+// Participants with detailed portfolio
 const participantList = document.getElementById('participantList');
 participantList.innerHTML = '';
 if(systemState.participants.length === 0){
 participantList.innerHTML = '<div class="muted small">No participants yet.</div>';
 } else {
 systemState.participants.forEach((p, idx) => {
+// Calculate portfolio value
+let holdingsValue = 0;
+let holdingsHTML = '';
+
+if(p.investments && p.investments.length > 0) {
+p.investments.forEach(inv => {
+const currentStock = systemState.companies.find(c => c.symbol === inv.symbol);
+const currentPrice = currentStock ? currentStock.price : inv.buyPrice;
+const investmentValue = currentPrice * inv.qty;
+const profitLoss = (currentPrice - inv.buyPrice) * inv.qty;
+const profitLossPercent = ((currentPrice - inv.buyPrice) / inv.buyPrice) * 100;
+
+holdingsValue += investmentValue;
+
+const plColor = profitLoss >= 0 ? '#16a34a' : '#ef4444';
+holdingsHTML += `
+<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px;border-bottom:1px solid #f1f5f9">
+<div>
+<strong>${inv.symbol}</strong>: ${inv.qty} shares @ ${formatINR(inv.buyPrice)}
+</div>
+<div style="text-align:right">
+<div>Value: ${formatINR(investmentValue)}</div>
+<div style="color:${plColor};font-weight:600">
+${profitLoss >= 0 ? '+' : ''}${formatINR(profitLoss)} (${profitLoss >= 0 ? '+' : ''}${profitLossPercent.toFixed(2)}%)
+</div>
+</div>
+</div>
+`;
+});
+} else {
+holdingsHTML = '<div class="small muted" style="padding:4px 0">No holdings</div>';
+}
+
+const totalPortfolio = Number(p.cash) + holdingsValue;
+const totalInvested = p.investments.reduce((acc, inv) => acc + (inv.buyPrice * inv.qty), 0);
+const overallPL = holdingsValue - totalInvested;
+const overallPLColor = overallPL >= 0 ? '#16a34a' : '#ef4444';
+
 const div = document.createElement('div');
 div.className = 'participant-item';
+div.style.flexDirection = 'column';
+div.style.alignItems = 'stretch';
 div.innerHTML = `
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
 <div>
-<div style="font-weight:600">${p.username}</div>
-<div class="small muted">Balance: ${formatINR(p.cash)} | Holdings: ${p.investments.length}</div>
+<div style="font-weight:600;font-size:16px">${p.username}</div>
+<div class="small muted">Cash: ${formatINR(p.cash)} | Holdings: ${p.investments.length} stocks</div>
 </div>
 <div class="participant-actions">
 <button class="ghost" onclick="editParticipant(${idx})">Edit</button>
 <button class="danger" onclick="deleteParticipant(${idx})">Delete</button>
+</div>
+</div>
+<div style="background:#f8fafc;padding:10px;border-radius:8px;border:1px solid #e2e8f0">
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:8px">
+<div>
+<div class="small muted">Total Portfolio</div>
+<div style="font-weight:700;font-size:16px">${formatINR(totalPortfolio)}</div>
+</div>
+<div>
+<div class="small muted">Holdings Value</div>
+<div style="font-weight:700;font-size:16px">${formatINR(holdingsValue)}</div>
+</div>
+<div>
+<div class="small muted">Overall P/L</div>
+<div style="font-weight:700;font-size:16px;color:${overallPLColor}">
+${overallPL >= 0 ? '+' : ''}${formatINR(overallPL)}
+</div>
+</div>
+</div>
+${p.investments.length > 0 ? `
+<div style="margin-top:8px">
+<div class="small muted" style="margin-bottom:4px;font-weight:600">Investment Details:</div>
+${holdingsHTML}
+</div>
+` : holdingsHTML}
 </div>
 `;
 participantList.appendChild(div);
 });
 }
 
-// Stocks
+// Stocks with current prices and changes
 const stockList = document.getElementById('stockList');
 stockList.innerHTML = '';
 systemState.stocks.forEach((s, idx) => {
+// Find current live price
+const liveStock = systemState.companies.find(c => c.symbol === s.symbol);
+const currentPrice = liveStock ? liveStock.price : s.price;
+const priceChange = currentPrice - s.price;
+const priceChangePercent = ((currentPrice - s.price) / s.price) * 100;
+const changeColor = priceChange >= 0 ? '#16a34a' : '#ef4444';
+
+// Calculate total shares held by all participants
+let totalShares = 0;
+let totalInvested = 0;
+systemState.participants.forEach(p => {
+p.investments.forEach(inv => {
+if(inv.symbol === s.symbol) {
+totalShares += inv.qty;
+totalInvested += inv.buyPrice * inv.qty;
+}
+});
+});
+
+const currentValue = currentPrice * totalShares;
+const marketPL = currentValue - totalInvested;
+
 const div = document.createElement('div');
 div.className = 'stock-item';
+div.style.flexDirection = 'column';
+div.style.alignItems = 'stretch';
 div.innerHTML = `
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
 <div>
-<div style="font-weight:600">${s.symbol} - ${s.name}</div>
+<div style="font-weight:600;font-size:16px">${s.symbol} - ${s.name}</div>
 <div class="small muted">Starting Price: ${formatINR(s.price)}</div>
 </div>
 <div class="stock-actions">
 <button class="ghost" onclick="editStock(${idx})">Edit</button>
 <button class="danger" onclick="deleteStock(${idx})">Delete</button>
+</div>
+</div>
+<div style="background:#f8fafc;padding:10px;border-radius:8px;border:1px solid #e2e8f0">
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px">
+<div>
+<div class="small muted">Current Price</div>
+<div style="font-weight:700;font-size:16px">${formatINR(currentPrice)}</div>
+</div>
+<div>
+<div class="small muted">Price Change</div>
+<div style="font-weight:700;font-size:14px;color:${changeColor}">
+${priceChange >= 0 ? '+' : ''}${formatINR(priceChange)}
+<div class="small" style="color:${changeColor}">(${priceChange >= 0 ? '+' : ''}${priceChangePercent.toFixed(2)}%)</div>
+</div>
+</div>
+<div>
+<div class="small muted">Shares Held</div>
+<div style="font-weight:700;font-size:16px">${totalShares}</div>
+<div class="small muted">by participants</div>
+</div>
+<div>
+<div class="small muted">Market P/L</div>
+<div style="font-weight:700;font-size:14px;color:${marketPL >= 0 ? '#16a34a' : '#ef4444'}">
+${marketPL >= 0 ? '+' : ''}${formatINR(marketPL)}
+</div>
+<div class="small muted">Total: ${formatINR(currentValue)}</div>
+</div>
+</div>
 </div>
 `;
 stockList.appendChild(div);
@@ -723,7 +941,7 @@ alert('Failed to save participant');
 }
 
 async function deleteParticipant(index){
-if(!confirm(`Delete participant ${systemState.participants[index].username}?`)) return;
+if(!confirm("Delete participant " + systemState.participants[index].username + "?")) return;
 const username = systemState.participants[index].username;
 await deleteParticipantFromDB(username);
 systemState.participants.splice(index, 1);
@@ -790,7 +1008,7 @@ alert('Failed to save stock');
 }
 
 async function deleteStock(index){
-if(!confirm(`Delete stock ${systemState.stocks[index].symbol}?`)) return;
+if(!confirm("Delete stock " + systemState.stocks[index].symbol + "?")) return;
 const symbol = systemState.stocks[index].symbol;
 await deleteStockFromDB(symbol);
 systemState.stocks.splice(index, 1);
@@ -818,7 +1036,6 @@ const sellQtyInput = document.getElementById("sellQty");
 const buyBtn = document.getElementById("buyBtn");
 const sellBtn = document.getElementById("sellBtn");
 const intervalSelect = document.getElementById("intervalSelect");
-const pauseBtn = document.getElementById("pauseBtn");
 
 let expandedSymbolSelected = null;
 let expandedChart = null;
@@ -826,70 +1043,6 @@ let expandedChart = null;
 function calcMarketCap(){
 return systemState.companies.reduce((acc,c)=> acc + c.price * (1000000 + (c.symbol.charCodeAt(0)%5)*100000), 0);
 }
-// ✅ Confirmed working buy/sell logic with safety checks
-buyBtn.addEventListener("click", async () => {
-  if (!expandedSymbolSelected) {
-    alert("No stock selected!");
-    return;
-  }
-
-  const symbol = expandedSymbolSelected;
-  const company = systemState.companies.find(c => c.symbol === symbol);
-  if (!company) {
-    alert("Invalid company!");
-    return;
-  }
-
-  const qty = Number(buyQtyInput.value);
-  if (isNaN(qty) || qty <= 0) {
-    alert("Enter a valid quantity!");
-    return;
-  }
-
-  const totalCost = company.price * qty;
-
-  // Confirm dialog
-  const confirmBuy = confirm(
-    `Buy ${qty} shares of ${symbol} at ${formatINR(company.price)} each?\n\n` +
-    `Total amount to be withdrawn: ${formatINR(totalCost)}`
-  );
-  if (!confirmBuy) return;
-
-  console.log("Buying:", symbol, qty); // ✅ Debug log
-  await buyShares(symbol, qty);
-});
-
-sellBtn.addEventListener("click", async () => {
-  if (!expandedSymbolSelected) {
-    alert("No stock selected!");
-    return;
-  }
-
-  const symbol = expandedSymbolSelected;
-  const company = systemState.companies.find(c => c.symbol === symbol);
-  if (!company) {
-    alert("Invalid company!");
-    return;
-  }
-
-  const qty = Number(sellQtyInput.value);
-  if (isNaN(qty) || qty <= 0) {
-    alert("Enter a valid quantity!");
-    return;
-  }
-
-  const totalGain = company.price * qty;
-
-  // Confirm dialog
-  const confirmSell = confirm(
-    `Sell ${qty} shares of ${symbol} at ${formatINR(company.price)} each?\n\n` +
-    `Total amount to be deposited: ${formatINR(totalGain)}`
-  );
-  if (!confirmSell) return;
-
-  console.log("Selling:", symbol, qty); // ✅ Debug log
-  await sellShares(symbol, qty);
-});
 
 function renderHeader(){
 marketCapEl.textContent = formatINR(calcMarketCap()/1e6) + "M";
@@ -945,7 +1098,7 @@ drawSpark(canvas, c.history);
 function renderInvestments(){
 investListEl.innerHTML = "";
 if(currentUser.data.investments.length === 0){
-investListEl.innerHTML = `<div class="muted small" style="margin-top:8px">No holdings yet.</div>`;
+investListEl.innerHTML = '<div class="muted small" style="margin-top:8px">No holdings yet.</div>';
 portfolioEl.textContent = formatINR(currentUser.data.cash);
 return;
 }
@@ -1025,8 +1178,8 @@ const c = systemState.companies.find(x=>x.symbol===symbol);
 expandedSymbol.textContent = c.symbol;
 expandedName.textContent = c.name;
 expandedPrice.textContent = formatINR(c.price);
-expandedChange.textContent = `${c.change>=0?'+':''}${c.change.toFixed(2)} (${(((c.change)/(c.price - c.change))*100)||0 .toFixed(2)}%)`;
-expandedVol.textContent = `Vol ${c.volume.toLocaleString()}`;
+expandedChange.textContent = (c.change>=0?'+':'') + c.change.toFixed(2) + " (" + (((c.change)/(c.price - c.change))*100||0).toFixed(2) + "%)";
+expandedVol.textContent = "Vol " + c.volume.toLocaleString();
 expandedArea.style.display = "block";
 
 buyQtyInput.value = 10;
@@ -1034,60 +1187,9 @@ sellQtyInput.value = 10;
 
 drawExpandedChart(c.history, c.name);
 
-async function handleBuy(symbol, qty) {
-  const company = systemState.companies.find(c => c.symbol === symbol);
-  const totalCost = company.price * qty;
-
-  if (currentUser.data.cash < totalCost) {
-    alert("Insufficient funds!");
-    return;
-  }
-
-  currentUser.data.cash -= totalCost;
-
-  let inv = currentUser.data.investments.find(i => i.symbol === symbol);
-  if (inv) {
-    inv.buyPrice = (inv.buyPrice * inv.qty + company.price * qty) / (inv.qty + qty);
-    inv.qty += qty;
-  } else {
-    currentUser.data.investments.push({
-      symbol,
-      qty,
-      buyPrice: company.price
-    });
-  }
-
-  await saveParticipant(currentUser.data);
-  renderHeader();
-  renderInvestments();
-  alert(`Bought ${qty} shares of ${symbol} successfully.`);
+buyBtn.onclick = ()=> buyShares(symbol, Number(buyQtyInput.value||0));
+sellBtn.onclick = ()=> sellShares(symbol, Number(sellQtyInput.value||0));
 }
-
-async function handleSell(symbol, qty) {
-  let inv = currentUser.data.investments.find(i => i.symbol === symbol);
-  if (!inv || inv.qty < qty) {
-    alert("You don't have enough shares to sell!");
-    return;
-  }
-
-  const company = systemState.companies.find(c => c.symbol === symbol);
-  const totalGain = company.price * qty;
-
-  inv.qty -= qty;
-  if (inv.qty === 0) {
-    currentUser.data.investments = currentUser.data.investments.filter(i => i.symbol !== symbol);
-  }
-
-  currentUser.data.cash += totalGain;
-
-  await saveParticipant(currentUser.data);
-  renderHeader();
-  renderInvestments();
-  alert(`Sold ${qty} shares of ${symbol} successfully.`);
-}
-
-}
-
 
 function collapseExpanded(){
 expandedSymbolSelected = null;
@@ -1129,16 +1231,17 @@ plugins: { legend: { display: false } }
 Market tick
 ------------------------- */
 
-function marketTick(){
-systemState.companies = systemState.companies.map(c=>{
-const volatility = 0.04;
-const pct = (Math.random()*2 - 1)*volatility;
-const newPrice = Math.max(0.01, c.price * (1 + pct));
-const change = newPrice - c.price;
-const newHistory = [...c.history.slice(1), Number(newPrice.toFixed(2))];
-const newVolume = c.volume + Math.floor(randBetween(100,20000));
-return {...c, price: Number(newPrice.toFixed(2)), change: Number(change.toFixed(2)), history: newHistory, volume: newVolume};
-});
+async function marketTick(){
+// Only ONE user updates prices (to avoid conflicts)
+// You can make admin the price updater, or use a random chance
+const shouldUpdatePrices = Math.random() < 0.1; // 10% chance this user updates
+
+if(shouldUpdatePrices) {
+await updateStockPrices();
+} else {
+// Fetch latest prices from Supabase
+await fetchCurrentPrices();
+}
 
 renderHeader();
 renderCards();
@@ -1148,7 +1251,7 @@ if(expandedSymbolSelected){
 const c = systemState.companies.find(x=>x.symbol===expandedSymbolSelected);
 if(c){
 expandedPrice.textContent = formatINR(c.price);
-expandedVol.textContent = `Vol ${c.volume.toLocaleString()}`;
+expandedVol.textContent = "Vol " + c.volume.toLocaleString();
 drawExpandedChart(c.history, c.name);
 } else {
 collapseExpanded();
@@ -1156,151 +1259,141 @@ collapseExpanded();
 }
 }
 
+
+
+
 /* -------------------------
 Buy / Sell logic
 ------------------------- */
 
 async function buyShares(symbol, qty){
-  if(!qty || qty <= 0){ 
-    alert("Enter valid quantity"); 
-    return; 
-  }
+if(!qty || qty<=0){ alert("Enter valid quantity"); return; }
+const company = systemState.companies.find(c=>c.symbol===symbol);
+if(!company) return;
+const cost = company.price * qty;
+if(cost > currentUser.data.cash){ alert("Not enough cash"); return; }
 
-  const company = systemState.companies.find(c => c.symbol === symbol);
-  if(!company) return;
+// Show confirmation
+if(!showBuyConfirmation(symbol, qty, company.price, cost)) {
+return;
+}
 
-  const cost = company.price * qty;
-  if(cost > currentUser.data.cash){ 
-    alert("Not enough cash"); 
-    return; 
-  }
+currentUser.data.cash -= cost;
 
-  currentUser.data.cash -= cost;
+const existing = currentUser.data.investments.find(i=>i.symbol===symbol && i.buyPrice===company.price);
+if(existing){
+existing.qty += qty;
+} else {
+currentUser.data.investments.push({ symbol, qty, buyPrice: company.price, buyTime: Date.now() });
+}
 
-  // Merge with existing investments
-  const existing = currentUser.data.investments.find(i => i.symbol === symbol && i.buyPrice === company.price);
-  if(existing){
-    existing.qty += qty;
-  } else {
-    currentUser.data.investments.push({ 
-      symbol, 
-      qty, 
-      buyPrice: company.price, 
-      buyTime: Date.now() 
-    });
-  }
-
-  const saved = await syncParticipantData();
-  if(!saved) return;
-
-  renderHeader();
-  renderInvestments();
-  alert(`Bought ${qty} ${symbol} @ ${formatINR(company.price)} — cost ${formatINR(cost)}`);
+await syncParticipantData();
+renderHeader();
+renderInvestments();
+alert("✓ Purchase Successful!\n\nBought " + qty + " shares of " + symbol + "\nAmount Debited: " + formatINR(cost) + "\nRemaining Balance: " + formatINR(currentUser.data.cash));
 }
 
 async function sellShares(symbol, qty){
-  if(!qty || qty <= 0){ 
-    alert("Enter valid quantity"); 
-    return; 
-  }
+if(!qty || qty<=0){ alert("Enter valid quantity"); return; }
+let remaining = qty;
+let totalProceeds = 0;
 
-  let remaining = qty;
-  let totalProceeds = 0;
+// Calculate first
+const livePrice = systemState.companies.find(c=>c.symbol===symbol)?.price;
+if(!livePrice) { alert("Stock not found"); return; }
 
-  for(let i = currentUser.data.investments.length - 1; i >= 0 && remaining > 0; i--){
-    const inv = currentUser.data.investments[i];
-    if(inv.symbol !== symbol) continue;
+let canSell = 0;
+for(let i = 0; i < currentUser.data.investments.length; i++){
+const inv = currentUser.data.investments[i];
+if(inv.symbol === symbol) canSell += inv.qty;
+}
 
-    const sellQty = Math.min(inv.qty, remaining);
-    const livePrice = systemState.companies.find(c => c.symbol === symbol)?.price || inv.buyPrice;
-    totalProceeds += sellQty * livePrice;
+if(canSell < qty){
+alert("You don't hold that many shares to sell.");
+return;
+}
 
-    inv.qty -= sellQty;
-    remaining -= sellQty;
+totalProceeds = livePrice * qty;
 
-    if(inv.qty === 0) currentUser.data.investments.splice(i, 1);
-  }
+// Show confirmation
+if(!showSellConfirmation(symbol, qty, livePrice, totalProceeds)) {
+return;
+}
 
-  if(remaining > 0){
-    alert("You don't hold that many shares to sell.");
-    return;
-  }
+// Now execute the sale
+for(let i = currentUser.data.investments.length-1; i>=0 && remaining>0; i--){
+const inv = currentUser.data.investments[i];
+if(inv.symbol !== symbol) continue;
+const sellQty = Math.min(inv.qty, remaining);
+inv.qty -= sellQty;
+remaining -= sellQty;
+if(inv.qty === 0) currentUser.data.investments.splice(i,1);
+}
 
-  currentUser.data.cash += totalProceeds;
-
-  const saved = await syncParticipantData();
-  if(!saved) return;
-
-  renderHeader();
-  renderInvestments();
-  alert(`Sold ${qty} ${symbol} for ${formatINR(totalProceeds)}.`);
+currentUser.data.cash += totalProceeds;
+await syncParticipantData();
+renderHeader();
+renderInvestments();
+alert("✓ Sale Successful!\n\nSold " + qty + " shares of " + symbol + "\nAmount Credited: " + formatINR(totalProceeds) + "\nNew Balance: " + formatINR(currentUser.data.cash));
 }
 
 async function sellInvestment(index){
-  const inv = currentUser.data.investments[index];
-  if(!inv) return;
+const inv = currentUser.data.investments[index];
+if(!inv) return;
+const company = systemState.companies.find(c=>c.symbol===inv.symbol);
+const live = company ? company.price : inv.buyPrice;
+const proceeds = live * inv.qty;
+const profitLoss = proceeds - (inv.buyPrice * inv.qty);
 
-  const company = systemState.companies.find(c => c.symbol === inv.symbol);
-  const livePrice = company ? company.price : inv.buyPrice;
-  const proceeds = livePrice * inv.qty;
-  const profitLoss = proceeds - (inv.buyPrice * inv.qty);
+// Show confirmation
+if(!showSellConfirmation(inv.symbol, inv.qty, live, proceeds)) {
+return;
+}
 
-  currentUser.data.investments.splice(index, 1);
-  currentUser.data.cash += proceeds;
+currentUser.data.investments.splice(index,1);
+currentUser.data.cash += proceeds;
+await syncParticipantData();
+renderHeader();
+renderInvestments();
+alert("✓ Sale Successful!\n\n" + (profitLoss>=0 ? '💰 Profit' : '📉 Loss') + ": " + formatINR(Math.abs(profitLoss)) + "\nAmount Credited: " + formatINR(proceeds) + "\nNew Balance: " + formatINR(currentUser.data.cash));
+}
 
-  const saved = await syncParticipantData();
-  if(!saved) return;
-
-  renderHeader();
-  renderInvestments();
-  alert(`${profitLoss >= 0 ? 'Profit' : 'Loss'}: ${formatINR(profitLoss)} on ${inv.symbol}`);
+async function syncParticipantData(){
+const pIndex = systemState.participants.findIndex(p => p.username === currentUser.username);
+if(pIndex !== -1){
+systemState.participants[pIndex] = currentUser.data;
+await saveParticipant(currentUser.data);
+}
 }
 
 /* -------------------------
-Sync data with Supabase
+Confirmation Dialogs
 ------------------------- */
-async function syncParticipantData() {
-  try {
-    // Ensure ID is valid
-    const userId = Number(currentUser.data.id);
-    if (!userId) throw new Error("Invalid user ID");
 
-    // Ensure cash is a number
-    const cash = Number(currentUser.data.cash);
-    if (isNaN(cash)) throw new Error("Invalid cash value");
-
-    // Update local systemState
-    const pIndex = systemState.participants.findIndex(p => p.username === currentUser.username);
-    if (pIndex !== -1) {
-      systemState.participants[pIndex] = currentUser.data;
-    }
-
-    // Save to Supabase
-    const { error } = await supabase
-      .from('participants') // Your table name
-      .update({
-        cash: cash,
-        investments: JSON.stringify(currentUser.data.investments || []) // Ensure JSON format
-      })
-      .eq('id', userId); // Use numeric ID
-
-    if (error) {
-      console.error("Failed to save participant:", error.message);
-      alert("Error saving data. Check console.");
-      return false;
-    }
-
-    console.log("Participant data synced successfully.");
-    return true;
-
-  } catch (err) {
-    console.error("Unexpected error saving participant:", err);
-    alert("Unexpected error. Check console.");
-    return false;
-  }
+function showBuyConfirmation(symbol, qty, price, totalCost) {
+return confirm(
+"CONFIRM PURCHASE\n\n" +
+"Stock: " + symbol + "\n" +
+"Quantity: " + qty + " shares\n" +
+"Price per share: " + formatINR(price) + "\n" +
+"Total Amount: " + formatINR(totalCost) + "\n\n" +
+formatINR(totalCost) + " will be deducted from your account.\n\n" +
+"Do you want to proceed?"
+);
 }
 
 
+function showSellConfirmation(symbol, qty, livePrice, totalProceeds) {
+return confirm(
+"CONFIRM SALE\n\n" +
+"Stock: " + symbol + "\n" +
+"Quantity: " + qty + " shares\n" +
+"Price per share: " + formatINR(livePrice) + "\n" +
+"Total Amount: " + formatINR(totalProceeds) + "\n\n" +
+formatINR(totalProceeds) + " will be deposited to your account.\n\n" +
+"Do you want to proceed?"
+);
+}
 
 /* -------------------------
 Controls
@@ -1312,9 +1405,7 @@ await saveSystemConfig();
 restartTicker();
 });
 
-pauseBtn.addEventListener('click', ()=>{
-systemState.running = !systemState.running;
-pauseBtn.textContent = systemState.running ? 'Pause' : 'Resume';
+
 if(systemState.running) restartTicker(); else stopTicker();
 });
 
@@ -1360,17 +1451,30 @@ errorEl.style.display = 'block';
 document.getElementById('logoutBtn').addEventListener('click', logout);
 document.getElementById('logoutBtnParticipant').addEventListener('click', logout);
 
-document.getElementById('startMarketBtn').addEventListener('click', startMarket);
-document.getElementById('stopMarketBtn').addEventListener('click', stopMarket);
+document.getElementById('startMarketBtn').addEventListener('click', async ()=>{
+await startMarket();
+});
+
+document.getElementById('stopMarketBtn').addEventListener('click', async ()=>{
+await stopMarket();
+});
 
 document.getElementById('addParticipantBtn').addEventListener('click', addParticipant);
-document.getElementById('saveParticipantBtn').addEventListener('click', saveParticipantHandler);
+
+document.getElementById('saveParticipantBtn').addEventListener('click', async ()=>{
+await saveParticipantHandler();
+});
+
 document.getElementById('cancelParticipantBtn').addEventListener('click', ()=>{
 document.getElementById('participantModal').classList.remove('active');
 });
 
 document.getElementById('addStockBtn').addEventListener('click', addStock);
-document.getElementById('saveStockBtn').addEventListener('click', saveStockHandler);
+
+document.getElementById('saveStockBtn').addEventListener('click', async ()=>{
+await saveStockHandler();
+});
+
 document.getElementById('cancelStockBtn').addEventListener('click', ()=>{
 document.getElementById('stockModal').classList.remove('active');
 });
@@ -1391,6 +1495,7 @@ showLoginScreen();
 }
 
 init();
+
 </script>
 </body>
 </html>
